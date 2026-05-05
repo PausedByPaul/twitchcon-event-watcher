@@ -1,2 +1,2 @@
 *.exe
-sessions_state.json
+*_state.json

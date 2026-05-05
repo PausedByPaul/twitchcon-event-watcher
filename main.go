@@ -48,6 +48,28 @@ type APIResponse struct {
 	Sessions []Session `json:"sessions"`
 }
 
+// ── Exhibitor API types ────────────────────────────────────────────────────────
+
+type ExhibitorData struct {
+	Image       string   `json:"image"`
+	Name        string   `json:"name"`
+	Link        string   `json:"link"`
+	Description string   `json:"description"`
+	VendorType  string   `json:"vendor_type"`
+	Booth       string   `json:"booth"`
+	Tags        []string `json:"tags"`
+}
+
+type Exhibitor struct {
+	EventName   string        `json:"eventName"`
+	Data        ExhibitorData `json:"data"`
+	ExhibitorID string        `json:"exhibitorId"`
+}
+
+type ExhibitorAPIResponse struct {
+	Exhibitors []Exhibitor `json:"exhibitors"`
+}
+
 // ── Discord types ──────────────────────────────────────────────────────────────
 
 type DiscordEmbedFooter struct {
@@ -89,6 +111,17 @@ type Changes struct {
 	Updated []SessionChange
 }
 
+type ExhibitorChange struct {
+	Old Exhibitor
+	New Exhibitor
+}
+
+type ExhibitorChanges struct {
+	Added   []Exhibitor
+	Removed []Exhibitor
+	Updated []ExhibitorChange
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 func truncate(s string, max int) string {
@@ -96,6 +129,12 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return s[:max-3] + "..."
+}
+
+func normalizeTag(s string) string {
+	s = strings.ReplaceAll(s, `\u0026`, "&")
+	s = strings.TrimSpace(s)
+	return s
 }
 
 func speakerNames(speakers []Speaker) string {
@@ -112,7 +151,9 @@ func speakerNames(speakers []Speaker) string {
 
 func sortedTags(tags []string) string {
 	cp := make([]string, len(tags))
-	copy(cp, tags)
+	for i, t := range tags {
+		cp[i] = normalizeTag(t)
+	}
 	sort.Strings(cp)
 	return strings.Join(cp, ", ")
 }
@@ -128,6 +169,15 @@ func sessionKey(s Session) string {
 		d.Title, d.Date, d.Time, d.Location, d.Program,
 		tagStr, speakerStr, d.Description,
 		d.Featured, d.Private,
+	)
+}
+
+// exhibitorKey hashes the fields we care about for exhibitor change detection.
+func exhibitorKey(e Exhibitor) string {
+	d := e.Data
+	tagStr := sortedTags(d.Tags)
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+		d.Name, d.Booth, d.VendorType, d.Link, tagStr, d.Description,
 	)
 }
 
@@ -153,6 +203,26 @@ func fetchSessions(apiURL string) ([]Session, error) {
 	return ar.Sessions, nil
 }
 
+func fetchExhibitors(apiURL string) ([]Exhibitor, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("fetch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, body)
+	}
+
+	var ar ExhibitorAPIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	return ar.Exhibitors, nil
+}
+
 // ── State persistence ──────────────────────────────────────────────────────────
 
 func loadState(path string) ([]Session, error) {
@@ -172,6 +242,29 @@ func loadState(path string) ([]Session, error) {
 
 func saveState(path string, sessions []Session) error {
 	data, err := json.MarshalIndent(sessions, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
+}
+
+func loadExhibitorState(path string) ([]Exhibitor, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var exhibitors []Exhibitor
+	if err := json.Unmarshal(data, &exhibitors); err != nil {
+		return nil, err
+	}
+	return exhibitors, nil
+}
+
+func saveExhibitorState(path string, exhibitors []Exhibitor) error {
+	data, err := json.MarshalIndent(exhibitors, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -212,6 +305,43 @@ func detectChanges(previous, current []Session) Changes {
 	sort.Slice(changes.Removed, func(i, j int) bool { return byStart(changes.Removed[i], changes.Removed[j]) })
 	sort.Slice(changes.Updated, func(i, j int) bool {
 		return changes.Updated[i].New.Data.StartTimestamp < changes.Updated[j].New.Data.StartTimestamp
+	})
+
+	return changes
+}
+
+func detectExhibitorChanges(previous, current []Exhibitor) ExhibitorChanges {
+	oldMap := make(map[string]Exhibitor, len(previous))
+	for _, e := range previous {
+		oldMap[e.ExhibitorID] = e
+	}
+	newMap := make(map[string]Exhibitor, len(current))
+	for _, e := range current {
+		newMap[e.ExhibitorID] = e
+	}
+
+	var changes ExhibitorChanges
+
+	for id, ne := range newMap {
+		oe, exists := oldMap[id]
+		if !exists {
+			changes.Added = append(changes.Added, ne)
+		} else if exhibitorKey(oe) != exhibitorKey(ne) {
+			changes.Updated = append(changes.Updated, ExhibitorChange{Old: oe, New: ne})
+		}
+	}
+
+	for id, oe := range oldMap {
+		if _, exists := newMap[id]; !exists {
+			changes.Removed = append(changes.Removed, oe)
+		}
+	}
+
+	byName := func(a, b Exhibitor) bool { return a.Data.Name < b.Data.Name }
+	sort.Slice(changes.Added, func(i, j int) bool { return byName(changes.Added[i], changes.Added[j]) })
+	sort.Slice(changes.Removed, func(i, j int) bool { return byName(changes.Removed[i], changes.Removed[j]) })
+	sort.Slice(changes.Updated, func(i, j int) bool {
+		return changes.Updated[i].New.Data.Name < changes.Updated[j].New.Data.Name
 	})
 
 	return changes
@@ -382,6 +512,132 @@ func buildPayloads(changes Changes, webhookUsername string) []DiscordWebhookPayl
 	return payloads
 }
 
+func diffExhibitorFields(old, new Exhibitor) []DiscordEmbedField {
+	var fields []DiscordEmbedField
+	add := func(name, oldVal, newVal string) {
+		if oldVal != newVal {
+			fields = append(fields, DiscordEmbedField{
+				Name:  name,
+				Value: truncate(fmt.Sprintf("~~%s~~ → %s", oldVal, newVal), 1024),
+			})
+		}
+	}
+
+	add("Name", old.Data.Name, new.Data.Name)
+	add("Booth", old.Data.Booth, new.Data.Booth)
+	add("Type", old.Data.VendorType, new.Data.VendorType)
+	add("Link", old.Data.Link, new.Data.Link)
+	add("Tags", sortedTags(old.Data.Tags), sortedTags(new.Data.Tags))
+
+	if old.Data.Description != new.Data.Description {
+		fields = append(fields, DiscordEmbedField{
+			Name:  "Description changed",
+			Value: truncate(new.Data.Description, 1024),
+		})
+	}
+
+	return fields
+}
+
+func buildExhibitorEmbeds(changes ExhibitorChanges, ts string) []DiscordEmbed {
+	var embeds []DiscordEmbed
+
+	for _, e := range changes.Added {
+		desc := fmt.Sprintf("**%s** | Booth: %s\n🔗 %s\n🏷️ %s",
+			e.Data.VendorType, e.Data.Booth, e.Data.Link, sortedTags(e.Data.Tags),
+		)
+		embeds = append(embeds, DiscordEmbed{
+			Title:       truncate("➕ "+e.Data.Name, 256),
+			Description: truncate(desc, 4096),
+			Color:       colorGreen,
+			Timestamp:   ts,
+			Footer:      &DiscordEmbedFooter{Text: e.ExhibitorID},
+		})
+	}
+
+	for _, e := range changes.Removed {
+		desc := fmt.Sprintf("**%s** | Booth: %s", e.Data.VendorType, e.Data.Booth)
+		embeds = append(embeds, DiscordEmbed{
+			Title:       truncate("❌ "+e.Data.Name, 256),
+			Description: truncate(desc, 4096),
+			Color:       colorRed,
+			Timestamp:   ts,
+			Footer:      &DiscordEmbedFooter{Text: e.ExhibitorID},
+		})
+	}
+
+	for _, c := range changes.Updated {
+		fields := diffExhibitorFields(c.Old, c.New)
+		if len(fields) == 0 {
+			continue
+		}
+		embeds = append(embeds, DiscordEmbed{
+			Title:     truncate("✏️ "+c.New.Data.Name, 256),
+			Color:     colorAmber,
+			Fields:    fields,
+			Timestamp: ts,
+			Footer:    &DiscordEmbedFooter{Text: c.New.ExhibitorID},
+		})
+	}
+
+	return embeds
+}
+
+func buildExhibitorPayloads(changes ExhibitorChanges, webhookUsername string) []DiscordWebhookPayload {
+	if len(changes.Added) == 0 && len(changes.Removed) == 0 && len(changes.Updated) == 0 {
+		return nil
+	}
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	allEmbeds := buildExhibitorEmbeds(changes, ts)
+
+	summary := fmt.Sprintf(
+		"**TwitchCon Rotterdam 2026 — exhibitor update detected**\n➕ %d added  ❌ %d removed  ✏️ %d updated",
+		len(changes.Added), len(changes.Removed), len(changes.Updated),
+	)
+
+	var payloads []DiscordWebhookPayload
+	var batch []DiscordEmbed
+	batchChars := 0
+	isFirst := true
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		p := DiscordWebhookPayload{
+			Username: webhookUsername,
+			Embeds:   batch,
+		}
+		if isFirst {
+			p.Content = summary
+			isFirst = false
+		}
+		payloads = append(payloads, p)
+		batch = nil
+		batchChars = 0
+	}
+
+	for _, e := range allEmbeds {
+		ec := embedCharCount(e)
+		if len(batch) == maxEmbeds || (batchChars+ec > maxEmbedLen && len(batch) > 0) {
+			flush()
+		}
+		batch = append(batch, e)
+		batchChars += ec
+	}
+	flush()
+
+	if len(payloads) == 0 && !isFirst {
+		payloads = append(payloads, DiscordWebhookPayload{
+			Username: webhookUsername,
+			Content:  summary,
+		})
+	}
+
+	return payloads
+}
+
 // ── Webhook sender ─────────────────────────────────────────────────────────────
 
 func sendWebhook(webhookURL string, payload DiscordWebhookPayload) error {
@@ -425,41 +681,89 @@ func poll(cfg config) {
 		if err := saveState(cfg.stateFile, current); err != nil {
 			log.Printf("ERROR saving state: %v", err)
 		}
+	} else {
+		changes := detectChanges(previous, current)
+		log.Printf("Session changes: %d added, %d removed, %d updated",
+			len(changes.Added), len(changes.Removed), len(changes.Updated))
+
+		if len(changes.Added)+len(changes.Removed)+len(changes.Updated) > 0 {
+			payloads := buildPayloads(changes, cfg.webhookUsername)
+			for i, p := range payloads {
+				if err := sendWebhook(cfg.webhookURL, p); err != nil {
+					log.Printf("ERROR sending webhook payload %d/%d: %v", i+1, len(payloads), err)
+				} else {
+					log.Printf("Sent webhook payload %d/%d", i+1, len(payloads))
+				}
+				// Respect Discord's rate limit (≈5 req/2 s for webhooks).
+				if i < len(payloads)-1 {
+					time.Sleep(500 * time.Millisecond)
+				}
+			}
+		}
+
+		if err := saveState(cfg.stateFile, current); err != nil {
+			log.Printf("ERROR saving state: %v", err)
+		}
+	}
+
+	// ── Exhibitors ──────────────────────────────────────────────────────────────
+
+	log.Println("Polling TwitchCon exhibitors API…")
+
+	currentExhibitors, err := fetchExhibitors(cfg.exhibitorsAPIURL)
+	if err != nil {
+		log.Printf("ERROR fetching exhibitors: %v", err)
+		return
+	}
+	log.Printf("Fetched %d exhibitors", len(currentExhibitors))
+
+	previousExhibitors, err := loadExhibitorState(cfg.exhibitorsStateFile)
+	if err != nil {
+		log.Printf("ERROR loading exhibitor state: %v", err)
 		return
 	}
 
-	changes := detectChanges(previous, current)
-	log.Printf("Changes: %d added, %d removed, %d updated",
-		len(changes.Added), len(changes.Removed), len(changes.Updated))
+	if previousExhibitors == nil {
+		log.Println("No previous exhibitor state found — saving initial snapshot (no notifications sent)")
+		if err := saveExhibitorState(cfg.exhibitorsStateFile, currentExhibitors); err != nil {
+			log.Printf("ERROR saving exhibitor state: %v", err)
+		}
+		return
+	}
 
-	if len(changes.Added)+len(changes.Removed)+len(changes.Updated) > 0 {
-		payloads := buildPayloads(changes, cfg.webhookUsername)
+	exhibitorChanges := detectExhibitorChanges(previousExhibitors, currentExhibitors)
+	log.Printf("Exhibitor changes: %d added, %d removed, %d updated",
+		len(exhibitorChanges.Added), len(exhibitorChanges.Removed), len(exhibitorChanges.Updated))
+
+	if len(exhibitorChanges.Added)+len(exhibitorChanges.Removed)+len(exhibitorChanges.Updated) > 0 {
+		payloads := buildExhibitorPayloads(exhibitorChanges, cfg.webhookUsername)
 		for i, p := range payloads {
 			if err := sendWebhook(cfg.webhookURL, p); err != nil {
-				log.Printf("ERROR sending webhook payload %d/%d: %v", i+1, len(payloads), err)
+				log.Printf("ERROR sending exhibitor webhook payload %d/%d: %v", i+1, len(payloads), err)
 			} else {
-				log.Printf("Sent webhook payload %d/%d", i+1, len(payloads))
+				log.Printf("Sent exhibitor webhook payload %d/%d", i+1, len(payloads))
 			}
-			// Respect Discord's rate limit (≈5 req/2 s for webhooks).
 			if i < len(payloads)-1 {
 				time.Sleep(500 * time.Millisecond)
 			}
 		}
 	}
 
-	if err := saveState(cfg.stateFile, current); err != nil {
-		log.Printf("ERROR saving state: %v", err)
+	if err := saveExhibitorState(cfg.exhibitorsStateFile, currentExhibitors); err != nil {
+		log.Printf("ERROR saving exhibitor state: %v", err)
 	}
 }
 
 // ── Config & main ──────────────────────────────────────────────────────────────
 
 type config struct {
-	webhookURL      string
-	webhookUsername string
-	apiURL          string
-	stateFile       string
-	pollInterval    time.Duration
+	webhookURL          string
+	webhookUsername     string
+	apiURL              string
+	stateFile           string
+	exhibitorsAPIURL    string
+	exhibitorsStateFile string
+	pollInterval        time.Duration
 }
 
 func loadConfig() (config, error) {
@@ -469,11 +773,13 @@ func loadConfig() (config, error) {
 	}
 
 	cfg := config{
-		webhookURL:      webhookURL,
-		webhookUsername: envOr("WEBHOOK_USERNAME", "TwitchCon Watcher"),
-		apiURL:          envOr("API_URL", "https://api.twitchcon.com/sessions?eventName=rotterdam-2026"),
-		stateFile:       envOr("STATE_FILE", "sessions_state.json"),
-		pollInterval:    time.Hour,
+		webhookURL:          webhookURL,
+		webhookUsername:     envOr("WEBHOOK_USERNAME", "TwitchCon Watcher"),
+		apiURL:              envOr("API_URL", "https://api.twitchcon.com/sessions?eventName=rotterdam-2026"),
+		stateFile:           envOr("STATE_FILE", "sessions_state.json"),
+		exhibitorsAPIURL:    envOr("EXHIBITORS_API_URL", "https://api.twitchcon.com/exhibitors?eventName=rotterdam-2026"),
+		exhibitorsStateFile: envOr("EXHIBITORS_STATE_FILE", "exhibitors_state.json"),
+		pollInterval:        time.Hour,
 	}
 
 	if s := os.Getenv("POLL_INTERVAL"); s != "" {

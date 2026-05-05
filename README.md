@@ -4,12 +4,13 @@ A lightweight Go application that polls the TwitchCon sessions API once an hour 
 
 ## Features
 
-- Detects **added**, **removed**, and **updated** sessions
+- Monitors both the **sessions** schedule and the **exhibitors** list
+- Detects **added**, **removed**, and **updated** entries for each
 - Posts rich Discord embeds with colour-coded change types:
-  - ➕ **Green** — new session added
-  - ❌ **Red** — session removed
-  - ✏️ **Amber** — session details changed, with a field-by-field diff
-- Persists state to a local JSON file so only new changes are reported across restarts
+  - ➕ **Green** — new session / exhibitor added
+  - ❌ **Red** — session / exhibitor removed
+  - ✏️ **Amber** — details changed, with a field-by-field diff
+- Persists state to local JSON files so only new changes are reported across restarts
 - Handles Discord's rate limits and message size constraints automatically
 - No external dependencies — uses only the Go standard library
 
@@ -53,7 +54,7 @@ go build -o twitchcon-watcher .
 .\twitchcon-watcher.exe     # Windows
 ```
 
-On **first run** the app saves a baseline snapshot (`sessions_state.json`) and sends no notification — this prevents a flood of "added" messages for all existing sessions. From the second poll onwards, only genuine changes are reported.
+On **first run** the app saves baseline snapshots (`sessions_state.json` and `exhibitors_state.json`) and sends no notification — this prevents a flood of "added" messages for all existing sessions and exhibitors. From the second poll onwards, only genuine changes are reported.
 
 ## Configuration
 
@@ -62,10 +63,12 @@ All configuration is done through environment variables. See [.env.example](.env
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `DISCORD_WEBHOOK_URL` | ✅ | — | Discord incoming webhook URL |
-| `POLL_INTERVAL` | | `1h` | How often to poll the API. Accepts any Go duration string (e.g. `30m`, `2h`) |
-| `STATE_FILE` | | `sessions_state.json` | Path to the local state file |
+| `POLL_INTERVAL` | | `1h` | How often to poll the APIs. Accepts any Go duration string (e.g. `30m`, `2h`) |
+| `STATE_FILE` | | `sessions_state.json` | Path to the sessions state file |
 | `WEBHOOK_USERNAME` | | `TwitchCon Watcher` | Display name for the Discord bot |
 | `API_URL` | | `https://api.twitchcon.com/sessions?eventName=rotterdam-2026` | TwitchCon sessions API endpoint |
+| `EXHIBITORS_API_URL` | | `https://api.twitchcon.com/exhibitors?eventName=rotterdam-2026` | TwitchCon exhibitors API endpoint |
+| `EXHIBITORS_STATE_FILE` | | `exhibitors_state.json` | Path to the exhibitors state file |
 
 ## Running as a Service
 
@@ -99,6 +102,8 @@ You can also run this with Windows Task Scheduler set to trigger on system start
 
 ## How Change Detection Works
 
+### Sessions
+
 The app tracks sessions by their `sessionId`. On each poll:
 
 1. New IDs → **Added**
@@ -106,3 +111,13 @@ The app tracks sessions by their `sessionId`. On each poll:
 3. Same ID, different content → **Updated** (compares title, date, time, location, program, speakers, tags, description, featured, and private flags)
 
 Speaker and tag lists are sorted before comparison so reordering alone doesn't trigger an update notification.
+
+### Exhibitors
+
+The app tracks exhibitors by their `exhibitorId`. On each poll:
+
+1. New IDs → **Added**
+2. Missing IDs → **Removed**
+3. Same ID, different content → **Updated** (compares name, booth, vendor type, link, tags, and description)
+
+Tag lists are sorted before comparison so reordering alone doesn't trigger an update notification.
