@@ -184,16 +184,10 @@ func exhibitorKey(e Exhibitor) string {
 // inlineDiff produces a Discord-markdown string showing word-level changes
 // between oldVal and newVal. Words removed are struck through (~~word~~);
 // words added are bold (**word**); unchanged words are kept as-is.
-// ANSI escape sequences for Discord ```ansi code blocks.
-const (
-	ansiReset     = "\033[0m"
-	ansiRedStrike = "\033[31;9m" // red + strikethrough  (removed words)
-	ansiGreenBold = "\033[32;1m" // green + bold         (added words)
-)
-
-// inlineDiff produces a Discord ```ansi block showing word-level changes
-// between oldVal and newVal. Removed words are red strikethrough; added words
-// are green bold; unchanged words are plain.
+// inlineDiff produces a Discord markdown string showing word-level changes
+// between oldVal and newVal. Removed word runs are prefixed with 🔴 and struck
+// through; added word runs are prefixed with 🟢 and bold. Both render on
+// desktop and mobile without ANSI escape codes.
 func inlineDiff(oldVal, newVal string) string {
 	if oldVal == newVal {
 		return newVal
@@ -201,10 +195,10 @@ func inlineDiff(oldVal, newVal string) string {
 	oldWords := strings.Fields(oldVal)
 	newWords := strings.Fields(newVal)
 	if len(oldWords) == 0 {
-		return "```ansi\n" + ansiGreenBold + newVal + ansiReset + "\n```"
+		return "🟢 **" + newVal + "**"
 	}
 	if len(newWords) == 0 {
-		return "```ansi\n" + ansiRedStrike + oldVal + ansiReset + "\n```"
+		return "🔴 ~~" + oldVal + "~~"
 	}
 
 	m, n := len(oldWords), len(newWords)
@@ -264,24 +258,17 @@ func inlineDiff(oldVal, newVal string) string {
 				run = append(run, ops[idx].word)
 				idx++
 			}
-			sb.WriteString(ansiRedStrike + strings.Join(run, " ") + ansiReset)
+			sb.WriteString("🔴 ~~" + strings.Join(run, " ") + "~~")
 		case 2:
 			var run []string
 			for idx < len(ops) && ops[idx].kind == 2 {
 				run = append(run, ops[idx].word)
 				idx++
 			}
-			sb.WriteString(ansiGreenBold + strings.Join(run, " ") + ansiReset)
+			sb.WriteString("🟢 **" + strings.Join(run, " ") + "**")
 		}
 	}
-
-	content := sb.String()
-	// Cap content so total field value stays within Discord's 1024-char limit.
-	// "```ansi\n" (8) + content + "\n```" (4) = 12 chars overhead.
-	if len(content) > 1010 {
-		content = content[:1010] + "..."
-	}
-	return "```ansi\n" + content + "\n```"
+	return sb.String()
 }
 
 // ── API ────────────────────────────────────────────────────────────────────────
