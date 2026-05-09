@@ -181,6 +181,92 @@ func exhibitorKey(e Exhibitor) string {
 	)
 }
 
+// inlineDiff produces a Discord-markdown string showing word-level changes
+// between oldVal and newVal. Words removed are struck through (~~word~~);
+// words added are bold (**word**); unchanged words are kept as-is.
+func inlineDiff(oldVal, newVal string) string {
+	if oldVal == newVal {
+		return newVal
+	}
+	oldWords := strings.Fields(oldVal)
+	newWords := strings.Fields(newVal)
+	if len(oldWords) == 0 {
+		return "**" + newVal + "**"
+	}
+	if len(newWords) == 0 {
+		return "~~" + oldVal + "~~"
+	}
+
+	m, n := len(oldWords), len(newWords)
+	dp := make([][]int, m+1)
+	for i := range dp {
+		dp[i] = make([]int, n+1)
+	}
+	for i := 1; i <= m; i++ {
+		for j := 1; j <= n; j++ {
+			if oldWords[i-1] == newWords[j-1] {
+				dp[i][j] = dp[i-1][j-1] + 1
+			} else if dp[i-1][j] >= dp[i][j-1] {
+				dp[i][j] = dp[i-1][j]
+			} else {
+				dp[i][j] = dp[i][j-1]
+			}
+		}
+	}
+
+	type diffOp struct {
+		kind int // 0=equal, 1=delete, 2=insert
+		word string
+	}
+	ops := make([]diffOp, 0, m+n)
+	i, j := m, n
+	for i > 0 || j > 0 {
+		switch {
+		case i > 0 && j > 0 && oldWords[i-1] == newWords[j-1]:
+			ops = append(ops, diffOp{0, oldWords[i-1]})
+			i--
+			j--
+		case j > 0 && (i == 0 || dp[i][j-1] >= dp[i-1][j]):
+			ops = append(ops, diffOp{2, newWords[j-1]})
+			j--
+		default:
+			ops = append(ops, diffOp{1, oldWords[i-1]})
+			i--
+		}
+	}
+	for l, r := 0, len(ops)-1; l < r; l, r = l+1, r-1 {
+		ops[l], ops[r] = ops[r], ops[l]
+	}
+
+	var sb strings.Builder
+	idx := 0
+	for idx < len(ops) {
+		if sb.Len() > 0 {
+			sb.WriteByte(' ')
+		}
+		switch ops[idx].kind {
+		case 0:
+			sb.WriteString(ops[idx].word)
+			idx++
+		case 1:
+			var run []string
+			for idx < len(ops) && ops[idx].kind == 1 {
+				run = append(run, ops[idx].word)
+				idx++
+			}
+			sb.WriteString("~~" + strings.Join(run, " ") + "~~")
+		case 2:
+			var run []string
+			for idx < len(ops) && ops[idx].kind == 2 {
+				run = append(run, ops[idx].word)
+				idx++
+			}
+			sb.WriteString("**" + strings.Join(run, " ") + "**")
+		}
+	}
+	return sb.String()
+}
+
 // ── API ────────────────────────────────────────────────────────────────────────
 
 func fetchSessions(apiURL string) ([]Session, error) {
@@ -363,7 +449,7 @@ func diffFields(old, new Session) []DiscordEmbedField {
 		if oldVal != newVal {
 			fields = append(fields, DiscordEmbedField{
 				Name:  name,
-				Value: truncate(fmt.Sprintf("~~%s~~ → %s", oldVal, newVal), 1024),
+				Value: truncate(inlineDiff(oldVal, newVal), 1024),
 			})
 		}
 	}
@@ -380,8 +466,8 @@ func diffFields(old, new Session) []DiscordEmbedField {
 
 	if old.Data.Description != new.Data.Description {
 		fields = append(fields, DiscordEmbedField{
-			Name:  "Description changed",
-			Value: truncate(new.Data.Description, 1024),
+			Name:  "Description",
+			Value: truncate(inlineDiff(old.Data.Description, new.Data.Description), 1024),
 		})
 	}
 
@@ -518,7 +604,7 @@ func diffExhibitorFields(old, new Exhibitor) []DiscordEmbedField {
 		if oldVal != newVal {
 			fields = append(fields, DiscordEmbedField{
 				Name:  name,
-				Value: truncate(fmt.Sprintf("~~%s~~ → %s", oldVal, newVal), 1024),
+				Value: truncate(inlineDiff(oldVal, newVal), 1024),
 			})
 		}
 	}
@@ -531,8 +617,8 @@ func diffExhibitorFields(old, new Exhibitor) []DiscordEmbedField {
 
 	if old.Data.Description != new.Data.Description {
 		fields = append(fields, DiscordEmbedField{
-			Name:  "Description changed",
-			Value: truncate(new.Data.Description, 1024),
+			Name:  "Description",
+			Value: truncate(inlineDiff(old.Data.Description, new.Data.Description), 1024),
 		})
 	}
 
